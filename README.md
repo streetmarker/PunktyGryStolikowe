@@ -11,9 +11,9 @@ A simple Android application for keeping track of scores in the game **Triominos
 ## Screenshots
 
 ### Game Screen
-<img src="./screenshots/game_screen.png" alt="Game Screen" width="300" height="200"/>
+<img src="./screenshots/game_screen.png" alt="Game Screen" height="500"/>
 
 
 ### History List
-<img src="./screenshots/history_list" alt="History List" width="300" height="200"/>
+<img src="./screenshots/history_list.png" alt="History List" height="500"/>
 
