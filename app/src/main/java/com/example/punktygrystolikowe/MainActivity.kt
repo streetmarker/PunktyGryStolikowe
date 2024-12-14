@@ -3,6 +3,7 @@ package com.example.punktygrystolikowe
 import android.annotation.SuppressLint
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -50,11 +51,11 @@ fun GameApp() {
     var points by remember { mutableStateOf(playerNames.associateWith { 0 }) }
 
     // Funkcja do aktualizacji punktów
-    fun updatePoints(player: String, score: Int) {
-        points = points.toMutableMap().apply {
-            this[player] = (this[player] ?: 0) + score
-        }
-    }
+//    fun updatePoints(player: String, score: Int) {
+//        points = points.toMutableMap().apply {
+//            this[player] = (this[player] ?: 0) + score
+//        }
+//    }
     when (currentScreen) {
         "start" -> StartScreen(
                 onPlayersConfirmed = { names ->
@@ -146,8 +147,9 @@ fun MainGameScreen(
     onUpdatePoints: (String, Int) -> Unit,
     onShowWinner: () -> Unit // Callback do pokazania ekranu zwycięzcy
 ) {
+    AppWithBackBlocked()
     fun winner() {
-        onShowWinner();
+        onShowWinner()
     }
     // Wywołanie ekranu gry
     GameScreen(
@@ -175,6 +177,7 @@ fun GameScreen(
     val playerWithMaxPoints = points.filter { it.value == maxPoints }.keys.firstOrNull()
     var showInfoBox by remember { mutableStateOf(true) } // Flaga do kontrolowania widoczności info boxa
     var isNegative by remember { mutableStateOf(false) } // Flaga do kontroli znaku liczby
+    var noMoveCounter by remember { mutableIntStateOf(4) } // Liczba ile razy minusowa kolejka gracza
     var minusPointsCounter by remember { mutableIntStateOf(0) }
     var nextRoundDialog by remember { mutableStateOf(false) }
     var maxMinusPointsDialog by remember { mutableStateOf(false) }
@@ -222,35 +225,35 @@ fun GameScreen(
 //                    .padding(8.dp),
                 horizontalArrangement = Arrangement.SpaceEvenly // Ustawienie rozmieszczenia elementów
             ) {
-                    Button(
-                        onClick = {
-                            val scoreValue = if (isNegative) -(score.toIntOrNull() ?: 0) else score.toIntOrNull() ?: 0 // TODO do funkcji
-//                            val currentPlayer = playerNames[currentPlayerIndex]
-//                            onUpdatePoints(currentPlayer, scoreValue)
-//                            pointHistory.add("${pointHistory.size+1}. $currentPlayer: $scoreValue pkt")
-//                            score = "";
-                            if (isNegative) {
-                                minusPointsCounter++
-                            } else {
-                                minusPointsCounter = 0
-                            }
-
-                            if(minusPointsCounter >= 4 && scoreValue != -10){
-                                maxMinusPointsDialog = true
-                            } else if (minusPointsCounter > 4) {
-                                maxMinusPointsDialog = true
-                            } else {
-                                val currentPlayer = playerNames[currentPlayerIndex]
-                                onUpdatePoints(currentPlayer, scoreValue)
-                                pointHistory.add("${pointHistory.size+1}. $currentPlayer: $scoreValue pkt")
-                                score = "";
-                            }
-
-                        },
-                        modifier = Modifier.weight(1f).padding(8.dp).fillMaxWidth()
-                    ) {
-                        Text("Zatwierdź punkt")
-                    }
+//                    Button(
+//                        onClick = {
+//                            val scoreValue = if (isNegative) -(score.toIntOrNull() ?: 0) else score.toIntOrNull() ?: 0 // TODO do funkcji
+////                            val currentPlayer = playerNames[currentPlayerIndex]
+////                            onUpdatePoints(currentPlayer, scoreValue)
+////                            pointHistory.add("${pointHistory.size+1}. $currentPlayer: $scoreValue pkt")
+////                            score = "";
+////                            if (isNegative) {
+////                                minusPointsCounter++
+////                            } else {
+////                                minusPointsCounter = 0
+////                            }
+//
+////                            if(minusPointsCounter >= 4 && scoreValue != -10){
+////                                maxMinusPointsDialog = true
+////                            } else if (minusPointsCounter > 4) {
+////                                maxMinusPointsDialog = true
+////                            } else {
+//                                val currentPlayer = playerNames[currentPlayerIndex]
+//                                onUpdatePoints(currentPlayer, scoreValue)
+//                                pointHistory.add("${pointHistory.size+1}. $currentPlayer: $scoreValue pkt")
+//                                score = "";
+////                            }
+//
+//                        },
+//                        modifier = Modifier.weight(1f).padding(8.dp).fillMaxWidth()
+//                    ) {
+//                        Text("Zatwierdź punkt")
+//                    }
                 Button(
                     onClick = {
                         if(score.isNotEmpty()) {
@@ -261,6 +264,7 @@ fun GameScreen(
                                 round += 1
                             }
                             minusPointsCounter = 0
+                            noMoveCounter = 4
                         }
                     },
                     modifier = Modifier.weight(1f).padding(8.dp).fillMaxWidth()
@@ -297,10 +301,56 @@ fun GameScreen(
                             score = newValue
                         }
                     },
-                    label = { Text("Punkty") },
+                    label = { Text("Punkt") },
                     keyboardOptions = KeyboardOptions.Default.copy(keyboardType = KeyboardType.Number),
                     modifier = Modifier.weight(1f) // Sprawia, że TextField zajmuje resztę dostępnej szerokości
                 )    // Pole tekstowe dla liczby
+                Button(
+                    onClick = {
+                        val scoreValue = if (isNegative) -(score.toIntOrNull() ?: 0) else score.toIntOrNull() ?: 0 // TODO do funkcji
+                        val currentPlayer = playerNames[currentPlayerIndex]
+                        onUpdatePoints(currentPlayer, scoreValue)
+                        pointHistory.add("${pointHistory.size+1}. $currentPlayer: $scoreValue pkt")
+                        score = ""
+//                            }
+
+                    },
+                    modifier = Modifier.weight(1f).padding(8.dp).fillMaxWidth()
+                ) {
+                    Text("Zatwierdź punkt")
+                }
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center // Wyrównanie elementów w osi poziomej
+            ) {
+                // Przycisk do odjęcia -5 a za 4 razem -10
+                Button(
+                    onClick = {
+                        if (noMoveCounter > 0) {
+                            var scoreValue = -10
+                            if (noMoveCounter > 1) {
+                                scoreValue = -5
+                            }
+                            val currentPlayer = playerNames[currentPlayerIndex]
+                            onUpdatePoints(currentPlayer, scoreValue)
+                            pointHistory.add("${pointHistory.size + 1}. $currentPlayer: $scoreValue pkt")
+                            score = ""
+
+                            minusPointsCounter++
+                            noMoveCounter--
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        backgroundColor = if (noMoveCounter>0) Color.Cyan else Color.Gray // Kolor przycisku zależny od wybranego znaku
+                    ),
+                    modifier = Modifier.padding(end = 8.dp)
+                ) {
+                    Text("-5/-10")
+                }
             }
             if(minusPointsCounter != 0){
                 Text(
@@ -343,28 +393,28 @@ fun GameScreen(
 
                                 val scoreValue = if (isNegative) -(score.toIntOrNull() ?: 0) else score.toIntOrNull() ?: 0 // TODO do funkcji
 
-                                if (isNegative) {
-                                    minusPointsCounter++
-                                } else {
-                                    minusPointsCounter = 0
-                                }
+//                                if (isNegative) {
+//                                    minusPointsCounter++
+//                                } else {
+//                                    minusPointsCounter = 0
+//                                }
 
-                                if(minusPointsCounter >= 4 && scoreValue != -10){
-                                    maxMinusPointsDialog = true
-                                } else if (minusPointsCounter > 4) {
-                                    maxMinusPointsDialog = true
-                                } else {
+//                                if(minusPointsCounter >= 4 && scoreValue != -10){
+//                                    maxMinusPointsDialog = true
+//                                } else if (minusPointsCounter > 4) {
+//                                    maxMinusPointsDialog = true
+//                                } else {
                                     val currentPlayer = playerNames[currentPlayerIndex]
                                     onUpdatePoints(currentPlayer, scoreValue)
                                     pointHistory.add("${pointHistory.size+1}. $currentPlayer: $scoreValue pkt")
-                                    score = "";
+                                    score = ""
 
                                     // Kontynuuj działanie po zatwierdzeniu alertu
                                     currentPlayerIndex = (currentPlayerIndex + 1) % playerNames.size
                                     if (currentPlayerIndex == 0) {
                                         round += 1
                                     }
-                                }
+//                                }
                             }
                         ) {
                             Text("Zatwierdź")
@@ -437,6 +487,35 @@ fun GameScreen(
                                     "2. Wciśnij dla liczb ujemnych lub odciśnij znak minusa po lewej stronie\n" +
                                     "3. Zatwierdź punkt\n" +
                                     "4. Przejdź do ruchu następnego gracza gracza",
+                            modifier = Modifier.weight(1f) // Zapewnia, że Text zajmuje resztę dostępnej szerokości
+                        )
+                        IconButton(
+                            onClick = { showInfoBox = false },
+                            modifier = Modifier
+                                .padding(start = 8.dp)
+                                .size(24.dp) // Ustaw rozmiar ikony
+                        ) {
+                            Icon(
+                                painter = painterResource(id = R.drawable.ic_close), // Ikona zamknięcia (dodaj odpowiedni plik do zasobów)
+                                contentDescription = "Zamknij"
+                            )
+                        }
+                    }
+                }
+                Card(
+                    backgroundColor = Color.LightGray,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Przycisk `-5/-10` powoduje naliczenie kary za brak ruchu\n" +
+                                    "Punktów nie trzeba potwierdzać",
                             modifier = Modifier.weight(1f) // Zapewnia, że Text zajmuje resztę dostępnej szerokości
                         )
                         IconButton(
@@ -597,56 +676,98 @@ fun WinnerScreen(playerScores: Map<String, Int>, onGoBack: () -> Unit) {
         }
 
 }
-@Composable
-fun ShowAlertDialog() {
-    // Tworzenie stanu dla widoczności dialogu
-    var openDialog by remember { mutableStateOf(false) }
-
-    // Przycisk, który otworzy dialog
-    Button(onClick = { openDialog = true }) {
-        Text("Pokaż Alert")
-    }
-
-    // Definicja samego AlertDialog
-    if (openDialog) {
-        AlertDialog(
-            onDismissRequest = {
-                // Zamknięcie dialogu po kliknięciu w tło
-                openDialog = false
-            },
-            title = {
-                Text(text = "Tytuł Alertu")
-            },
-            text = {
-                Text("To jest treść alertu. Czy chcesz kontynuować?")
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        // Akcja po kliknięciu "Tak"
-                        openDialog = false
-                    }
-                ) {
-                    Text("Tak")
-                }
-            },
-            dismissButton = {
-                Button(
-                    onClick = {
-                        // Akcja po kliknięciu "Nie"
-                        openDialog = false
-                    }
-                ) {
-                    Text("Nie")
-                }
-            },
-            properties = DialogProperties(dismissOnBackPress = true, dismissOnClickOutside = true)
-        )
-    }
-}
+//@Composable
+//fun ShowAlertDialog() {
+//    // Tworzenie stanu dla widoczności dialogu
+//    var openDialog by remember { mutableStateOf(false) }
+//
+//    // Przycisk, który otworzy dialog
+//    Button(onClick = { openDialog = true }) {
+//        Text("Pokaż Alert")
+//    }
+//
+//    // Definicja samego AlertDialog
+//    if (openDialog) {
+//        AlertDialog(
+//            onDismissRequest = {
+//                // Zamknięcie dialogu po kliknięciu w tło
+//                openDialog = false
+//            },
+//            title = {
+//                Text(text = "Tytuł Alertu")
+//            },
+//            text = {
+//                Text("To jest treść alertu. Czy chcesz kontynuować?")
+//            },
+//            confirmButton = {
+//                Button(
+//                    onClick = {
+//                        // Akcja po kliknięciu "Tak"
+//                        openDialog = false
+//                    }
+//                ) {
+//                    Text("Tak")
+//                }
+//            },
+//            dismissButton = {
+//                Button(
+//                    onClick = {
+//                        // Akcja po kliknięciu "Nie"
+//                        openDialog = false
+//                    }
+//                ) {
+//                    Text("Nie")
+//                }
+//            },
+//            properties = DialogProperties(dismissOnBackPress = true, dismissOnClickOutside = true)
+//        )
+//    }
+//}
 @Preview(showBackground = true)
 @Composable
 fun DefaultPreview() {
     GameApp()
+}
+
+@Composable
+fun AppWithBackBlocked() {
+    var showExitDialog by remember { mutableStateOf(false) }
+
+    BackHandler {
+        showExitDialog = true
+    }
+
+    if (showExitDialog) {
+        AlertDialog(
+            onDismissRequest = {
+            },
+            title = {
+                Text(text = "Uwaga")
+            },
+            text = {
+                Text("Nie ma wyjścia z apki :)")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showExitDialog = false
+                    }
+                ) {
+                    Text("OK")
+                }
+            },
+        )
+    }
+//    BackHandler {
+//        // Nie rób nic — blokuj działanie przycisku cofania
+//    }
+//
+//    // Twoja zawartość aplikacji
+//    Box(
+//        modifier = Modifier.fillMaxSize(),
+//        contentAlignment = Alignment.Center
+//    ) {
+//        Text("Aplikacja zablokowana na cofanie")
+//    }
 }
 
