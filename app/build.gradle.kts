@@ -78,5 +78,7 @@ dependencies {
 
     // Compose Navigation (dodaj jeśli używasz nawigacji)
     implementation("androidx.navigation:navigation-compose:2.7.2")
+    // Source: https://mvnrepository.com/artifact/com.google.code.gson/gson
+    implementation (libs.gson)
 
 }

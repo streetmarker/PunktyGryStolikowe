@@ -1,6 +1,10 @@
 package com.example.punktygrystolikowe
 
+import android.content.Context
+import com.google.gson.Gson
+import java.io.File
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -20,12 +24,15 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -36,7 +43,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
@@ -46,21 +52,102 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.text.KeyboardOptions
-import android.content.Context
 import android.media.MediaPlayer
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.math.sqrt
 import kotlin.random.Random
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+
+// ── Historia rozgrywek — model danych ─────────────────────────────────────────
+data class PlayerResult(val name: String, val score: Int)
+
+data class GameRecord(
+    val id: Long,
+    val date: String,
+    val players: List<PlayerResult>,
+    val winner: String,       // jedno imię LUB "Remis: A, B" przy remisie
+    val rounds: Int = 0,
+    val isTie: Boolean = false
+)
+
+// ── Zapis / odczyt z SharedPreferences (JSON) ─────────────────────────────────
+object GameHistoryManager {
+    private const val PREFS = "triominos_history"
+    private const val KEY   = "records"
+    private const val MAX   = 100
+
+    fun save(context: Context, record: GameRecord) {
+        val all = load(context).toMutableList()
+        all.add(0, record)
+        val trimmed = all.take(MAX)
+        val arr = JSONArray()
+        trimmed.forEach { r ->
+            val obj = JSONObject()
+            obj.put("id",     r.id)
+            obj.put("date",   r.date)
+            obj.put("winner", r.winner)
+            obj.put("rounds", r.rounds)
+            obj.put("isTie",  r.isTie)
+            val ps = JSONArray()
+            r.players.forEach { p ->
+                ps.put(JSONObject().apply {
+                    put("name",  p.name)
+                    put("score", p.score)
+                })
+            }
+            obj.put("players", ps)
+            arr.put(obj)
+        }
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putString(KEY, arr.toString()).apply()
+    }
+
+    fun load(context: Context): List<GameRecord> {
+        val json = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY, null) ?: return emptyList()
+        return try {
+            val arr = JSONArray(json)
+            (0 until arr.length()).map { i ->
+                val obj = arr.getJSONObject(i)
+                val ps  = obj.getJSONArray("players")
+                GameRecord(
+                    id      = obj.getLong("id"),
+                    date    = obj.getString("date"),
+                    winner  = obj.getString("winner"),
+                    rounds  = obj.optInt("rounds", 0),
+                    isTie   = obj.optBoolean("isTie", false),
+                    players = (0 until ps.length()).map { j ->
+                        val p = ps.getJSONObject(j)
+                        PlayerResult(p.getString("name"), p.getInt("score"))
+                    }
+                )
+            }
+        } catch (e: Exception) { emptyList() }
+    }
+
+    fun clear(context: Context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().apply()
+    }
+
+    fun formatNow(): String =
+        SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.getDefault()).format(Date())
+}
 
 // ── Snapshot do cofania ruchów ─────────────────────────────────────────────────
 data class GameSnapshot(
@@ -72,6 +159,44 @@ data class GameSnapshot(
     val historySize: Int,
     val actionDescription: String   // np. "Jan: +15 pkt" lub "Brak ruchu Ania: −5 pkt"
 )
+data class GameState(
+    val playerNames: List<String>,
+    val points: Map<String, Int>,
+    val round: Int,
+    val currentPlayerIndex: Int
+)
+
+object GameStateManager {
+
+    private const val FILE_NAME = "currentGame.json"
+    private val gson = Gson()
+
+    fun save(context: Context, state: GameState) {
+        try {
+            val file = File(context.filesDir, FILE_NAME)
+            val json = gson.toJson(state)
+            file.writeText(json)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun load(context: Context): GameState? {
+        return try {
+            val file = File(context.filesDir, FILE_NAME)
+            if (!file.exists()) return null
+            val json = file.readText()
+            gson.fromJson(json, GameState::class.java)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    fun clear(context: Context) {
+        val file = File(context.filesDir, FILE_NAME)
+        if (file.exists()) file.delete()
+    }
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -84,34 +209,142 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun GameApp() {
-    var playerNames by remember { mutableStateOf(listOf<String>()) }
-    var currentScreen by remember { mutableStateOf("start") }
-    var points by remember { mutableStateOf(playerNames.associateWith { 0 }) }
+    val context = LocalContext.current
+    val activity = context as? Activity
+
+    // ── Stan przeżywający rotację i przejście do tła ───────────────────────────
+    // rememberSaveable zachowuje wartości przy rotacji ekranu oraz powrocie z tła.
+    var currentScreen by rememberSaveable { mutableStateOf("start") }
+    var playerNames   by rememberSaveable { mutableStateOf(listOf<String>()) }
+
+    // Map<String,Int> nie jest bezpośrednio savowalny – przechowujemy jako dwie
+    // równoległe listy i rekonstruujemy mapę przy każdym odczycie.
+    var pointKeys by rememberSaveable { mutableStateOf(listOf<String>()) }
+    var pointVals by rememberSaveable { mutableStateOf(listOf<Int>()) }
+    val points: Map<String, Int> = remember(pointKeys, pointVals) {
+        pointKeys.zip(pointVals).toMap()
+    }
+    fun setPoints(map: Map<String, Int>) {
+        pointKeys = map.keys.toList()
+        pointVals = map.values.toList()
+    }
+    val savedGame = GameStateManager.load(context)
+
+    LaunchedEffect(Unit) {
+        savedGame?.let {
+            playerNames = it.playerNames
+            setPoints(it.points)
+            currentScreen = "game"
+        }
+    }
+    // ── Globalny BackHandler — dialog wyjścia ─────────────────────────────────
+    // Obsługuje przycisk systemowy „Wróć" na KAŻDYM ekranie aplikacji.
+    // Home / Recent apps / przełączenie apki → Android sam wstrzymuje apkę
+    // (stan jest zachowany); tu reagujemy tylko na świadome naciśnięcie Back.
+    var showExitDialog by rememberSaveable { mutableStateOf(false) }
+
+    BackHandler {
+        showExitDialog = true
+    }
+
+    if (showExitDialog) {
+        AlertDialog(
+            onDismissRequest = { showExitDialog = false },
+            backgroundColor = Color(0xFF1A1A4E),
+            shape = RoundedCornerShape(20.dp),
+            title = {
+                Column(horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.fillMaxWidth()) {
+                    Text("🚪", fontSize = 32.sp)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Wyjść z gry?",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp
+                    )
+                }
+            },
+            text = {
+                Text(
+                    text = if (currentScreen == "game")
+                        "Trwa rozgrywka — postęp nie zostanie zapisany.\nCzy na pewno chcesz wyjść?"
+                    else
+                        "Czy na pewno chcesz zamknąć aplikację?",
+                    color = Color.White.copy(alpha = 0.8f),
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = { activity?.finishAffinity() },
+                    colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFFE63946)),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Tak, wyjdź", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                Button(
+                    onClick = { showExitDialog = false },
+                    colors = ButtonDefaults.buttonColors(backgroundColor = Color(0x447B6FD8)),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Zostań w grze", color = Color.White)
+                }
+            },
+            properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false)
+        )
+    }
 
     when (currentScreen) {
         "start" -> StartScreen(
             onPlayersConfirmed = { names ->
                 playerNames = names
-                points = names.associateWith { 0 }.toMutableMap()
+                setPoints(names.associateWith { 0 })
                 currentScreen = "game"
             }
         )
         "game" -> MainGameScreen(
             playerNames = playerNames,
             points = points,
-            onShowWinner = { currentScreen = "winner_screen" },
-            onUpdatePoints = { player, score ->
-                points = points.toMutableMap().apply {
-                    this[player] = (this[player] ?: 0) + score
-                }
+            onShowWinner = { rounds ->
+                val sorted   = points.entries.sortedByDescending { it.value }
+                val topScore = sorted.first().value
+                val tied     = sorted.filter { it.value == topScore }
+                val isTie    = tied.size > 1
+                val winnerLabel = if (isTie)
+                    "Remis: ${tied.joinToString(", ") { it.key }}"
+                else
+                    sorted.first().key
+                GameHistoryManager.save(context, GameRecord(
+                    id      = System.currentTimeMillis(),
+                    date    = GameHistoryManager.formatNow(),
+                    players = sorted.map { PlayerResult(it.key, it.value) },
+                    winner  = winnerLabel,
+                    rounds  = rounds,
+                    isTie   = isTie
+                ))
+                currentScreen = "winner_screen"
             },
-            onRestorePoints = { snapshot ->
-                points = snapshot.toMutableMap()
-            }
+            onUpdatePoints = { player, score ->
+                setPoints(points.toMutableMap().apply {
+                    this[player] = (this[player] ?: 0) + score
+                })
+            },
+            onRestorePoints = { snapshot -> setPoints(snapshot) }
         )
         "winner_screen" -> WinnerScreen(
             playerScores = points,
-            onGoBack = { currentScreen = "start" }
+            onGoBack = {
+                // Reset stanu gry, wróć na ekran startowy
+                playerNames = listOf()
+                setPoints(mapOf())
+                currentScreen = "start"
+            }
         )
     }
 }
@@ -247,10 +480,284 @@ fun TriominosLogo(modifier: Modifier = Modifier, scale: Float = 1f) {
     }
 }
 
+// ── Dialog historii rozgrywek ──────────────────────────────────────────────────
+@Composable
+fun GameHistoryDialog(context: Context, onDismiss: () -> Unit) {
+    var records by remember { mutableStateOf(GameHistoryManager.load(context)) }
+    var showClearConfirm by remember { mutableStateOf(false) }
+
+    val gradientCard = Brush.verticalGradient(
+        colors = listOf(Color(0xFF1A1A4E), Color(0xFF2D1B69))
+    )
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(0.95f)
+                .fillMaxHeight(0.85f)
+                .clip(RoundedCornerShape(24.dp))
+                .background(Brush.verticalGradient(
+                    colors = listOf(Color(0xFF0D0D2B), Color(0xFF1A1A4E), Color(0xFF2D1B69))
+                ))
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+
+                // ── Nagłówek dialogu ───────────────────────────────────────────
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Historia",
+                            fontSize = 22.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color.White
+                        )
+                        Text(
+                            text = "${records.size} rozgrywek",
+                            fontSize = 13.sp,
+                            color = Color(0xFF7B6FD8)
+                        )
+                    }
+                    if (records.isNotEmpty()) {
+                        Button(
+                            onClick = { showClearConfirm = true },
+                            colors = ButtonDefaults.buttonColors(backgroundColor = Color(0x33E63946)),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier.height(36.dp),
+                            elevation = ButtonDefaults.elevation(0.dp)
+                        ) {
+                            Text("🗑 Wyczyść", fontSize = 12.sp, color = Color(0xFFFF6B6B), fontWeight = FontWeight.Bold)
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                    }
+                    IconButton(onClick = onDismiss, modifier = Modifier.size(36.dp)) {
+                        Text("✕", color = Color(0xFF7B6FD8), fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                Divider(color = Color.White.copy(alpha = 0.08f))
+
+                // ── Lista lub pusty stan ───────────────────────────────────────
+                if (records.isEmpty()) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("🎲", fontSize = 48.sp)
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                text = "Brak zapisanych rozgrywek",
+                                color = Color.White.copy(alpha = 0.5f),
+                                fontSize = 15.sp
+                            )
+                            Text(
+                                text = "Zagraj i wróć tutaj!",
+                                color = Color(0xFF7B6FD8),
+                                fontSize = 13.sp
+                            )
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        items(records, key = { it.id }) { record ->
+                            GameRecordCard(record = record)
+                        }
+                    }
+                }
+            }
+
+            // ── Potwierdzenie wyczyszczenia ────────────────────────────────────
+            if (showClearConfirm) {
+                AlertDialog(
+                    onDismissRequest = { showClearConfirm = false },
+                    backgroundColor = Color(0xFF1A1A4E),
+                    title = {
+                        Text("Wyczyścić historię?", color = Color.White, fontWeight = FontWeight.Bold)
+                    },
+                    text = {
+                        Text(
+                            "Wszystkie ${records.size} rozgrywki zostaną trwale usunięte.",
+                            color = Color.White.copy(alpha = 0.8f)
+                        )
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                GameHistoryManager.clear(context)
+                                records = emptyList()
+                                showClearConfirm = false
+                            },
+                            colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFFE63946)),
+                            shape = RoundedCornerShape(10.dp)
+                        ) { Text("Usuń", color = Color.White, fontWeight = FontWeight.Bold) }
+                    },
+                    dismissButton = {
+                        Button(
+                            onClick = { showClearConfirm = false },
+                            colors = ButtonDefaults.buttonColors(backgroundColor = Color(0x447B6FD8)),
+                            shape = RoundedCornerShape(10.dp)
+                        ) { Text("Anuluj", color = Color.White) }
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun GameRecordCard(record: GameRecord) {
+    val topScore    = record.players.firstOrNull()?.score ?: 0
+    val tiedPlayers = record.players.filter { it.score == topScore }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        backgroundColor = Color(0x33FFFFFF),
+        elevation = 0.dp
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+
+            // ── Data, liczba rund, badge remisu ────────────────────────────────
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = record.date,
+                    fontSize = 12.sp, color = Color(0xFF7B6FD8),
+                    fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f)
+                )
+                if (record.isTie) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color(0x333A86FF))
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                    ) {
+                        Text(
+                            text = "🤝 REMIS",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF7BC8FF),
+                            letterSpacing = 1.sp
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
+                }
+                if (record.rounds > 0) {
+                    Text(text = "${record.rounds} rund", fontSize = 11.sp,
+                        color = Color.White.copy(alpha = 0.45f))
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            if (record.isTie) {
+                // ── Remis: pokaż wszystkich remisujących w niebieskim wierszu ──
+                tiedPlayers.forEachIndexed { idx, player ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (idx == 0) Color(0x333A86FF) else Color(0x1A3A86FF))
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(if (idx == 0) "🤝 " else "   ", fontSize = 16.sp)
+                        Text(
+                            text = player.name,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF7BC8FF),
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1, overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = "${player.score} pkt",
+                            fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                            color = Color(0xFF7BC8FF)
+                        )
+                    }
+                    if (idx < tiedPlayers.lastIndex)
+                        Spacer(modifier = Modifier.height(4.dp))
+                }
+            } else {
+                // ── Zwykłe zwycięstwo ─────────────────────────────────────────
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0x33FFBE0B))
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("🏆 ", fontSize = 16.sp)
+                    Text(
+                        text = record.winner,
+                        fontSize = 16.sp, fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFFFFBE0B), modifier = Modifier.weight(1f),
+                        maxLines = 1, overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "${topScore} pkt",
+                        fontSize = 15.sp, fontWeight = FontWeight.Bold,
+                        color = Color(0xFFFFBE0B)
+                    )
+                }
+            }
+
+            // ── Pozostali gracze ───────────────────────────────────────────────
+            val others = if (record.isTie) record.players.filter { it.score < topScore }
+            else record.players.drop(1)
+            if (others.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                others.forEachIndexed { index, player ->
+                    val pos = if (record.isTie) tiedPlayers.size + index
+                    else index + 1
+                    val medal = when (pos) { 1 -> "🥈" 2 -> "🥉" else -> "  ${pos + 1}." }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(text = medal, fontSize = 14.sp, modifier = Modifier.width(30.dp))
+                        Text(
+                            text = player.name, color = Color.White.copy(alpha = 0.75f),
+                            fontSize = 14.sp, modifier = Modifier.weight(1f),
+                            maxLines = 1, overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = "${player.score} pkt",
+                            color = Color.White.copy(alpha = 0.6f),
+                            fontSize = 14.sp, fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 fun StartScreen(onPlayersConfirmed: (List<String>) -> Unit) {
     var playerName by remember { mutableStateOf("") }
     val playerNames = remember { mutableStateListOf<String>() }
+    var showHistory by remember { mutableStateOf(false) }
+    val context = LocalContext.current
 
     val gradientBg = Brush.verticalGradient(
         colors = listOf(Color(0xFF0D0D2B), Color(0xFF1A1A4E), Color(0xFF2D1B69))
@@ -308,6 +815,31 @@ fun StartScreen(onPlayersConfirmed: (List<String>) -> Unit) {
                     color = Color(0xFF7B6FD8),
                     textAlign = TextAlign.Center
                 )
+
+                // ── Przycisk historii rozgrywek ────────────────────────────────
+                Button(
+                    onClick = { showHistory = true },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(44.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(backgroundColor = Color(0x337B6FD8)),
+                    elevation = ButtonDefaults.elevation(0.dp)
+                ) {
+                    Text(
+                        text = "📋  Historia rozgrywek",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFFB4A8F0)
+                    )
+                }
+
+                if (showHistory) {
+                    GameHistoryDialog(
+                        context = context,
+                        onDismiss = { showHistory = false }
+                    )
+                }
 
                 Spacer(modifier = Modifier.height(8.dp))
 
@@ -451,15 +983,15 @@ fun MainGameScreen(
     points: Map<String, Int>,
     onUpdatePoints: (String, Int) -> Unit,
     onRestorePoints: (Map<String, Int>) -> Unit,
-    onShowWinner: () -> Unit
+    onShowWinner: (rounds: Int) -> Unit
 ) {
-    AppWithBackBlocked()
+    // Back obsługiwany globalnie w GameApp — tu nie blokujemy
     GameScreen(
         playerNames = playerNames,
         points = points,
         onUpdatePoints = onUpdatePoints,
         onRestorePoints = onRestorePoints,
-        onShowWinner = { onShowWinner() }
+        onShowWinner = { rounds -> onShowWinner(rounds) }
     )
 }
 //@Preview(showBackground = true)
@@ -469,26 +1001,33 @@ fun GameScreen(
     points: Map<String, Int>,
     onUpdatePoints: (String, Int) -> Unit,
     onRestorePoints: (Map<String, Int>) -> Unit,
-    onShowWinner: () -> Unit
+    onShowWinner: (rounds: Int) -> Unit
 ) {
-    var currentPlayerIndex by remember { mutableIntStateOf(0) }
-    var score by remember { mutableStateOf("") }
-    var round by remember { mutableIntStateOf(1) }
-    val pointHistory = remember { mutableStateListOf<String>() }
-    val drawerState = rememberDrawerState(DrawerValue.Closed)
-    val scope = rememberCoroutineScope()
-    val maxPoints = points.values.maxOrNull() ?: 0
-    val playerWithMaxPoints = points.filter { it.value == maxPoints }.keys.firstOrNull()
-    var showInfoBox by remember { mutableStateOf(true) }
-    var noMoveCounter by remember { mutableIntStateOf(4) }
-    var minusPointsCounter by remember { mutableIntStateOf(0) }
-    var maxMinusPointsDialog by remember { mutableStateOf(false) }
-    val resetFlow = remember { MutableSharedFlow<Unit>() }
-    val coroutineScope = rememberCoroutineScope()
+    val context = LocalContext.current
+    var currentPlayerIndex by rememberSaveable { mutableIntStateOf(0) }
+    var score              by rememberSaveable { mutableStateOf("") }
+    var round              by rememberSaveable { mutableIntStateOf(1) }
+    var showInfoBox        by rememberSaveable { mutableStateOf(true) }
+    var noMoveCounter      by rememberSaveable { mutableIntStateOf(4) }
+    var minusPointsCounter by rememberSaveable { mutableIntStateOf(0) }
+    var maxMinusPointsDialog by rememberSaveable { mutableStateOf(false) }
+    var undoMessage        by rememberSaveable { mutableStateOf<String?>(null) }
 
-    // ── Stos cofania ───────────────────────────────────────────────────────────
+    // Historia punktów — rememberSaveable z listSaver (przeżywa rotację)
+    val pointHistory = rememberSaveable(
+        saver = listSaver(
+            save    = { it.toList() },
+            restore = { it.toMutableStateList() }
+        )
+    ) { mutableStateListOf<String>() }
+
+    // Stos cofania — złożony typ, nie jest savowalny; akceptujemy reset przy rotacji
     val undoStack = remember { ArrayDeque<GameSnapshot>() }
-    var undoMessage by remember { mutableStateOf<String?>(null) }
+
+    val drawerState  = rememberDrawerState(DrawerValue.Closed)
+    val scope        = rememberCoroutineScope()
+    val coroutineScope = rememberCoroutineScope()
+    val resetFlow    = remember { MutableSharedFlow<Unit>() }
 
     // Auto-ukryj komunikat cofnięcia po 2.5s
     LaunchedEffect(undoMessage) {
@@ -527,6 +1066,18 @@ fun GameScreen(
         colors = listOf(Color(0xFF0D0D2B), Color(0xFF1A1A4E), Color(0xFF2D1B69))
     )
 
+    // Derived — wyliczane z mapy points przekazywanej z zewnątrz
+    val maxPoints = points.values.maxOrNull() ?: 0
+    val playerWithMaxPoints = points.filter { it.value == maxPoints }.keys.firstOrNull()
+
+    LaunchedEffect(points, round, currentPlayerIndex) {
+        if (playerNames.isNotEmpty()) {
+            GameStateManager.save(
+                context,
+                GameState(playerNames, points, round, currentPlayerIndex)
+            )
+        }
+    }
     fun nextRound() {
         currentPlayerIndex = (currentPlayerIndex + 1) % playerNames.size
         if (currentPlayerIndex == 0) round += 1
@@ -925,7 +1476,7 @@ fun GameScreen(
                         Text("📜 Historia", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                     }
                     Button(
-                        onClick = { onShowWinner() },
+                        onClick = { onShowWinner(round) },
                         modifier = Modifier.weight(1f).height(48.dp),
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF7209B7)),
@@ -973,177 +1524,177 @@ fun GameScreen(
 @Composable
 fun WinnerScreen(playerScores: Map<String, Int>, onGoBack: () -> Unit) {
     val sortedPlayers = playerScores.entries.sortedByDescending { it.value }
-    val topPlayer = sortedPlayers.first()
+    val topScore      = sortedPlayers.first().value
+    val tiedPlayers   = sortedPlayers.filter { it.value == topScore }
+    val isTie         = tiedPlayers.size > 1
 
-    // ── Tło: gradient ──────────────────────────────────────────────────────────
+    // ── Tło ───────────────────────────────────────────────────────────────────
     val gradientBg = Brush.verticalGradient(
-        colors = listOf(
-            Color(0xFF0D0D2B),
-            Color(0xFF1A1A4E),
-            Color(0xFF2D1B69)
-        )
+        colors = listOf(Color(0xFF0D0D2B), Color(0xFF1A1A4E), Color(0xFF2D1B69))
     )
 
     // ── Konfetti ───────────────────────────────────────────────────────────────
     val confettiCount = 120
-    val confettiX = remember { List(confettiCount) { Random.nextFloat() } }
-    val confettiY = remember { List(confettiCount) { Random.nextFloat() } }
-    val confettiRotations = remember { List(confettiCount) { Random.nextFloat() * 360f } }
+    val confettiX     = remember { List(confettiCount) { Random.nextFloat() } }
+    val confettiY     = remember { List(confettiCount) { Random.nextFloat() } }
     val confettiColors = remember {
-        List(confettiCount) {
-            listOf(
-                Color(0xFFF72585), Color(0xFF7209B7), Color(0xFF3A86FF),
-                Color(0xFFFFBE0B), Color(0xFF06D6A0), Color(0xFFFF6B6B)
-            ).random()
-        }
+        // Remis → tęczowe kolory; zwycięstwo → standardowe
+        val palette = if (isTie)
+            listOf(Color(0xFF3A86FF), Color(0xFF06D6A0), Color(0xFFFFBE0B),
+                Color(0xFFF72585), Color(0xFFFF9F1C), Color(0xFF8338EC))
+        else
+            listOf(Color(0xFFF72585), Color(0xFF7209B7), Color(0xFF3A86FF),
+                Color(0xFFFFBE0B), Color(0xFF06D6A0), Color(0xFFFF6B6B))
+        List(confettiCount) { palette.random() }
     }
     val infiniteTransition = rememberInfiniteTransition(label = "confetti")
     val confettiFall by infiniteTransition.animateFloat(
-        initialValue = -0.15f,
-        targetValue = 1.1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(4500, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ), label = "fall"
+        initialValue = -0.15f, targetValue = 1.1f,
+        animationSpec = infiniteRepeatable(tween(4500, easing = LinearEasing), RepeatMode.Restart),
+        label = "fall"
     )
     val confettiSway by infiniteTransition.animateFloat(
-        initialValue = -1f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(2000),
-            repeatMode = RepeatMode.Reverse
-        ), label = "sway"
+        initialValue = -1f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(2000), RepeatMode.Reverse), label = "sway"
     )
 
-    // ── Animacja wejścia ───────────────────────────────────────────────────────
+    // ── Animacje wejścia ───────────────────────────────────────────────────────
     var visible by remember { mutableStateOf(false) }
-    val cardScale = remember { Animatable(0.7f) }
-    val trophyScale = remember { Animatable(0f) }
-
+    val cardScale   = remember { Animatable(0.7f) }
+    val heroScale   = remember { Animatable(0f) }
     LaunchedEffect(Unit) {
         visible = true
-        cardScale.animateTo(
-            targetValue = 1f,
-            animationSpec = tween(600, easing = EaseOutBack)
-        )
-        trophyScale.animateTo(
-            targetValue = 1f,
-            animationSpec = tween(500, easing = EaseOutBack)
-        )
+        cardScale.animateTo(1f, tween(600, easing = EaseOutBack))
+        heroScale.animateTo(1f, tween(500, easing = EaseOutBack))
     }
 
-    // ── Pulsowanie trofeum ─────────────────────────────────────────────────────
-    val trophyPulse by infiniteTransition.animateFloat(
-        initialValue = 1f,
-        targetValue = 1.08f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(900),
-            repeatMode = RepeatMode.Reverse
-        ), label = "pulse"
+    // ── Pulsowanie ikony głównej ───────────────────────────────────────────────
+    val heroPulse by infiniteTransition.animateFloat(
+        initialValue = 1f, targetValue = 1.08f,
+        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "pulse"
     )
 
-    // ── Blask za trofeum ───────────────────────────────────────────────────────
+    // ── Blask ─────────────────────────────────────────────────────────────────
     val glowAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.3f,
-        targetValue = 0.7f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1200),
-            repeatMode = RepeatMode.Reverse
-        ), label = "glow"
+        initialValue = 0.3f, targetValue = 0.7f,
+        animationSpec = infiniteRepeatable(tween(1200), RepeatMode.Reverse), label = "glow"
+    )
+    // Kolor blasku: złoty dla zwycięzcy, tęczowy (cyan) dla remisu
+    val glowColor = if (isTie) Color(0xFF3A86FF) else Color(0xFFFFBE0B)
+    // Dodatkowy shift blasku przy remisie — kolory się przeplatają
+    val glowShift by infiniteTransition.animateFloat(
+        initialValue = 0f, targetValue = 360f,
+        animationSpec = infiniteRepeatable(tween(3000, easing = LinearEasing), RepeatMode.Restart),
+        label = "glowShift"
     )
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(gradientBg)
-    ) {
-        // ── Konfetti canvas ───────────────────────────────────────────────────
+    Box(modifier = Modifier.fillMaxSize().background(gradientBg)) {
+
+        // ── Konfetti ─────────────────────────────────────────────────────────
         Canvas(modifier = Modifier.fillMaxSize()) {
             for (i in 0 until confettiCount) {
                 val x = (confettiX[i] + confettiSway * 0.03f * (i % 3 - 1)) * size.width
                 val y = ((confettiY[i] + confettiFall) % 1.25f) * size.height
-                val rot = confettiRotations[i] + confettiFall * 360f
-                drawRect(
-                    color = confettiColors[i],
-                    topLeft = Offset(x, y),
-                    size = Size(9f, 18f),
-                    alpha = 0.85f
-                )
+                drawRect(color = confettiColors[i], topLeft = Offset(x, y),
+                    size = Size(9f, 18f), alpha = 0.85f)
             }
         }
 
         AnimatedVisibility(
             visible = visible,
             enter = fadeIn(tween(400)) + slideInVertically(
-                initialOffsetY = { it / 3 },
-                animationSpec = tween(500, easing = EaseOutCubic)
+                initialOffsetY = { it / 3 }, animationSpec = tween(500, easing = EaseOutCubic)
             )
         ) {
+            val scrollState = rememberScrollState()
             Column(
                 modifier = Modifier
                     .fillMaxSize()
+                    .verticalScroll(scrollState)
                     .padding(horizontal = 20.dp, vertical = 32.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.SpaceBetween
+                verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 // ── Nagłówek ──────────────────────────────────────────────────
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
                         text = "KONIEC GRY",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF7B6FD8),
-                        letterSpacing = 6.sp
+                        fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                        color = Color(0xFF7B6FD8), letterSpacing = 6.sp
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "Wyniki końcowe",
-                        fontSize = 26.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White
+                        text = if (isTie) "Remis!" else "Wyniki końcowe",
+                        fontSize = 26.sp, fontWeight = FontWeight.Bold,
+                        color = if (isTie) Color(0xFF3A86FF) else Color.White
                     )
                 }
 
-                // ── Karta zwycięzcy ───────────────────────────────────────────
+                // ── Karta główna: zwycięzca lub remis ─────────────────────────
                 Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .scale(cardScale.value),
+                    modifier = Modifier.fillMaxWidth().scale(cardScale.value),
                     shape = RoundedCornerShape(28.dp),
-                    backgroundColor = Color(0x33FFFFFF),
+                    backgroundColor = if (isTie) Color(0x223A86FF) else Color(0x33FFFFFF),
                     elevation = 0.dp
                 ) {
                     Column(
                         modifier = Modifier.padding(24.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        // Blask + trofeum
+                        // Blask + ikona
                         Box(contentAlignment = Alignment.Center) {
                             Canvas(modifier = Modifier.size(120.dp)) {
                                 drawCircle(
-                                    color = Color(0xFFFFBE0B).copy(alpha = glowAlpha),
+                                    color = glowColor.copy(alpha = glowAlpha),
                                     radius = size.minDimension / 2
                                 )
                             }
                             Text(
-                                text = "🏆",
+                                text = if (isTie) "🤝" else "🏆",
                                 fontSize = 64.sp,
-                                modifier = Modifier.scale(trophyPulse * trophyScale.value)
+                                modifier = Modifier.scale(heroPulse * heroScale.value)
                             )
                         }
                         Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = topPlayer.key,
-                            fontSize = 32.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFFFFBE0B),
-                            textAlign = TextAlign.Center
-                        )
-                        Text(
-                            text = "${topPlayer.value} punktów",
-                            fontSize = 18.sp,
-                            color = Color.White.copy(alpha = 0.8f)
-                        )
+
+                        if (isTie) {
+                            // ── Remis: pokaż wszystkich remisujących ────────────
+                            Text(
+                                text = "REMIS",
+                                fontSize = 22.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color(0xFF3A86FF),
+                                letterSpacing = 4.sp
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            tiedPlayers.forEach { player ->
+                                Text(
+                                    text = player.key,
+                                    fontSize = 22.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "$topScore punktów każdy",
+                                fontSize = 16.sp,
+                                color = Color(0xFF3A86FF).copy(alpha = 0.9f)
+                            )
+                        } else {
+                            // ── Zwycięzca ────────────────────────────────────
+                            Text(
+                                text = sortedPlayers.first().key,
+                                fontSize = 32.sp, fontWeight = FontWeight.Bold,
+                                color = Color(0xFFFFBE0B), textAlign = TextAlign.Center
+                            )
+                            Text(
+                                text = "${sortedPlayers.first().value} punktów",
+                                fontSize = 18.sp,
+                                color = Color.White.copy(alpha = 0.8f)
+                            )
+                        }
                     }
                 }
 
@@ -1157,23 +1708,31 @@ fun WinnerScreen(playerScores: Map<String, Int>, onGoBack: () -> Unit) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text(
                             text = "Tabela wyników",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF7B6FD8),
-                            letterSpacing = 3.sp,
+                            fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                            color = Color(0xFF7B6FD8), letterSpacing = 3.sp,
                             modifier = Modifier.padding(bottom = 12.dp)
                         )
                         sortedPlayers.forEachIndexed { index, player ->
-                            val medal = when (index) {
-                                0 -> "🥇"
-                                1 -> "🥈"
-                                2 -> "🥉"
+                            val isTiedRow = player.value == topScore
+                            // Przy remisie wszyscy liderzy dostają 🤝 i niebieski wiersz
+                            // Przy zwycięstwie standardowe medale
+                            val medal = when {
+                                isTie && isTiedRow -> "🤝"
+                                !isTie && index == 0 -> "🥇"
+                                index == 1 || (isTie && index == tiedPlayers.size)     -> "🥈"
+                                index == 2 || (isTie && index == tiedPlayers.size + 1) -> "🥉"
                                 else -> "  ${index + 1}."
                             }
-                            val rowBg = if (index == 0)
-                                Color(0x33FFBE0B)
-                            else
-                                Color.Transparent
+                            val rowBg = when {
+                                isTie && isTiedRow -> Color(0x333A86FF)
+                                !isTie && index == 0 -> Color(0x33FFBE0B)
+                                else -> Color.Transparent
+                            }
+                            val nameColor = when {
+                                isTie && isTiedRow -> Color(0xFF7BC8FF)
+                                !isTie && index == 0 -> Color(0xFFFFBE0B)
+                                else -> Color.White
+                            }
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1182,31 +1741,20 @@ fun WinnerScreen(playerScores: Map<String, Int>, onGoBack: () -> Unit) {
                                     .padding(horizontal = 12.dp, vertical = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                Text(text = medal, fontSize = 20.sp, modifier = Modifier.width(40.dp))
                                 Text(
-                                    text = medal,
-                                    fontSize = 20.sp,
-                                    modifier = Modifier.width(40.dp)
+                                    text = player.key, fontSize = 17.sp,
+                                    fontWeight = if (isTiedRow || index == 0) FontWeight.Bold else FontWeight.Normal,
+                                    color = nameColor, modifier = Modifier.weight(1f)
                                 )
                                 Text(
-                                    text = player.key,
-                                    fontSize = 17.sp,
-                                    fontWeight = if (index == 0) FontWeight.Bold else FontWeight.Normal,
-                                    color = if (index == 0) Color(0xFFFFBE0B) else Color.White,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                Text(
-                                    text = "${player.value} pkt",
-                                    fontSize = 17.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (index == 0) Color(0xFFFFBE0B) else Color.White.copy(alpha = 0.75f)
+                                    text = "${player.value} pkt", fontSize = 17.sp,
+                                    fontWeight = FontWeight.Bold, color = nameColor.copy(alpha = 0.9f)
                                 )
                             }
-                            if (index < sortedPlayers.lastIndex) {
-                                Divider(
-                                    color = Color.White.copy(alpha = 0.08f),
-                                    modifier = Modifier.padding(vertical = 2.dp)
-                                )
-                            }
+                            if (index < sortedPlayers.lastIndex)
+                                Divider(color = Color.White.copy(alpha = 0.08f),
+                                    modifier = Modifier.padding(vertical = 2.dp))
                         }
                     }
                 }
@@ -1214,21 +1762,15 @@ fun WinnerScreen(playerScores: Map<String, Int>, onGoBack: () -> Unit) {
                 // ── Przycisk nowej gry ────────────────────────────────────────
                 Button(
                     onClick = { onGoBack() },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(54.dp),
+                    modifier = Modifier.fillMaxWidth().height(54.dp),
                     shape = RoundedCornerShape(16.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        backgroundColor = Color(0xFF7209B7)
-                    ),
+                    colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF7209B7)),
                     elevation = ButtonDefaults.elevation(8.dp)
                 ) {
                     Text(
                         text = "🎮  Nowa gra",
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White,
-                        letterSpacing = 1.sp
+                        fontSize = 18.sp, fontWeight = FontWeight.Bold,
+                        color = Color.White, letterSpacing = 1.sp
                     )
                 }
             }
@@ -1239,31 +1781,6 @@ fun WinnerScreen(playerScores: Map<String, Int>, onGoBack: () -> Unit) {
 @Composable
 fun DefaultPreview() {
     GameApp()
-}
-
-@Composable
-fun AppWithBackBlocked() {
-    var showExitDialog by remember { mutableStateOf(false) }
-
-    BackHandler {
-        showExitDialog = true
-    }
-
-    if (showExitDialog) {
-        AlertDialog(
-            onDismissRequest = {},
-            backgroundColor = Color(0xFF1A1A4E),
-            title = { Text(text = "Uwaga", color = Color.White, fontWeight = FontWeight.Bold) },
-            text = { Text("Nie ma wyjścia z apki :)", color = Color.White.copy(alpha = 0.8f)) },
-            confirmButton = {
-                Button(
-                    onClick = { showExitDialog = false },
-                    colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF7209B7)),
-                    shape = RoundedCornerShape(10.dp)
-                ) { Text("OK", color = Color.White) }
-            },
-        )
-    }
 }
 
 @Composable
